@@ -3,7 +3,7 @@
 #   docker build -f apps/web/Dockerfile -t ambar-web .
 # La misma imagen sirve para cualquier entorno: toda la configuración se lee al arrancar.
 
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /repo
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY package.json package-lock.json turbo.json ./
@@ -23,7 +23,7 @@ COPY packages/banking-rules packages/banking-rules
 COPY apps/web apps/web
 RUN npm run build --workspace @ambar/web
 
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3001 HOSTNAME=0.0.0.0
 WORKDIR /app
 RUN addgroup -S ambar && adduser -S ambar -G ambar
