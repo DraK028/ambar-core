@@ -264,7 +264,7 @@ jobs:
       - name: Construir imagen
         run: docker build -f services/ledger/Dockerfile -t ambar-ledger:${{ github.sha }} .
       - name: Escanear imagen con Trivy
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ambar-ledger:${{ github.sha }}
           severity: CRITICAL,HIGH
@@ -280,7 +280,7 @@ jobs:
       - name: Construir imagen
         run: docker build -f apps/web/Dockerfile -t ambar-web:${{ github.sha }} .
       - name: Escanear imagen con Trivy
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ambar-web:${{ github.sha }}
           severity: CRITICAL,HIGH
@@ -296,7 +296,7 @@ jobs:
       - name: Construir imagen
         run: docker build -f services/assistant/Dockerfile -t ambar-assistant:${{ github.sha }} .
       - name: Escanear imagen con Trivy
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ambar-assistant:${{ github.sha }}
           severity: CRITICAL,HIGH
@@ -312,7 +312,7 @@ jobs:
       - name: Construir imagen
         run: docker build -f automation/n8n/Dockerfile -t ambar-n8n:${{ github.sha }} .
       - name: Escanear imagen con Trivy (informativo; la base es la imagen oficial de n8n)
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ambar-n8n:${{ github.sha }}
           severity: CRITICAL
@@ -338,7 +338,7 @@ jobs:
           terraform init -backend=false -input=false
           terraform validate
       - name: Escanear configuración con Trivy
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: infra/terraform
