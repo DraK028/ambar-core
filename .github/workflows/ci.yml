@@ -42,7 +42,7 @@ jobs:
         run: npm run test:cov -w @ambar/ledger -- --runInBand
       - name: Dependencias de producción sin vulnerabilidades altas
         run: npm audit --omit=dev --audit-level=high
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: coverage-ledger
@@ -87,7 +87,7 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: E2E con Playwright y axe-core (Postgres + Ledger + Asistente + Web)
         run: npm run e2e -w @ambar/web
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: playwright-report
@@ -248,7 +248,7 @@ jobs:
         run: node automation/n8n/e2e-local.mjs
         env:
           OPS_CAPTURE_FILE: ${{ runner.temp }}/ops.jsonl
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: automation-logs
