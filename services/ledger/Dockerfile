@@ -30,7 +30,11 @@ FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 # Usuario sin privilegios; el sistema de archivos puede montarse como solo lectura en ECS.
-RUN addgroup -S ambar && adduser -S ambar -G ambar
+# Parches del sistema base y fuera npm/yarn: en ejecución solo hace falta node,
+# y las dependencias del propio npm son la fuente más común de alertas en el escaneo.
+RUN apk upgrade --no-cache \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
+ && addgroup -S ambar && adduser -S ambar -G ambar
 COPY --from=build --chown=ambar:ambar /repo/node_modules ./node_modules
 COPY --from=build --chown=ambar:ambar /repo/services/ledger/package.json ./package.json
 COPY --from=build --chown=ambar:ambar /repo/services/ledger/dist ./dist

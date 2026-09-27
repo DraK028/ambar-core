@@ -257,50 +257,107 @@ jobs:
 
   image:
     name: Ledger · imagen Docker
+    permissions:
+      contents: read
+      security-events: write # publicar el SARIF de Trivy
     runs-on: ubuntu-latest
     needs: ledger
     steps:
       - uses: actions/checkout@v4
       - name: Construir imagen
         run: docker build -f services/ledger/Dockerfile -t ambar-ledger:${{ github.sha }} .
-      - name: Escanear imagen con Trivy
+      - name: Escanear imagen con Trivy (reporte para Security → Code scanning)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ambar-ledger:${{ github.sha }}
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          format: sarif
+          output: trivy-ambar-ledger.sarif
+          exit-code: '0'
+      - name: Publicar hallazgos
+        if: always() && github.event_name == 'push'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-ambar-ledger.sarif
+          category: trivy-ambar-ledger
+      - name: Fallar si hay vulnerabilidades altas o críticas con parche
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ambar-ledger:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          skip-setup-trivy: true
           exit-code: '1'
 
   web-image:
     name: Banca Web · imagen Docker
+    permissions:
+      contents: read
+      security-events: write # publicar el SARIF de Trivy
     runs-on: ubuntu-latest
     needs: web
     steps:
       - uses: actions/checkout@v4
       - name: Construir imagen
         run: docker build -f apps/web/Dockerfile -t ambar-web:${{ github.sha }} .
-      - name: Escanear imagen con Trivy
+      - name: Escanear imagen con Trivy (reporte para Security → Code scanning)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ambar-web:${{ github.sha }}
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          format: sarif
+          output: trivy-ambar-web.sarif
+          exit-code: '0'
+      - name: Publicar hallazgos
+        if: always() && github.event_name == 'push'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-ambar-web.sarif
+          category: trivy-ambar-web
+      - name: Fallar si hay vulnerabilidades altas o críticas con parche
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ambar-web:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          skip-setup-trivy: true
           exit-code: '1'
 
   assistant-image:
     name: Asistente · imagen Docker
+    permissions:
+      contents: read
+      security-events: write # publicar el SARIF de Trivy
     runs-on: ubuntu-latest
     needs: assistant
     steps:
       - uses: actions/checkout@v4
       - name: Construir imagen
         run: docker build -f services/assistant/Dockerfile -t ambar-assistant:${{ github.sha }} .
-      - name: Escanear imagen con Trivy
+      - name: Escanear imagen con Trivy (reporte para Security → Code scanning)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ambar-assistant:${{ github.sha }}
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          format: sarif
+          output: trivy-ambar-assistant.sarif
+          exit-code: '0'
+      - name: Publicar hallazgos
+        if: always() && github.event_name == 'push'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-ambar-assistant.sarif
+          category: trivy-ambar-assistant
+      - name: Fallar si hay vulnerabilidades altas o críticas con parche
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ambar-assistant:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          skip-setup-trivy: true
           exit-code: '1'
 
   n8n-image:
