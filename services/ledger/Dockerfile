@@ -2,7 +2,7 @@
 # Imagen del servicio Ledger para ECS Fargate. Se construye desde la raíz del monorepo:
 #   docker build -f services/ledger/Dockerfile -t ambar-ledger .
 
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /repo
 COPY package.json package-lock.json turbo.json ./
 # Todos los package.json del monorepo: npm ci valida el lockfile completo,
@@ -26,7 +26,7 @@ RUN npm run build --workspace @ambar/ledger \
  && npm prune --omit=dev --workspace @ambar/ledger \
  && rm node_modules/@ambar/events && cp -r packages/events node_modules/@ambar/events
 
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 # Usuario sin privilegios; el sistema de archivos puede montarse como solo lectura en ECS.
