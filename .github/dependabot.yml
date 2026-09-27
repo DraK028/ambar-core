@@ -1,23 +1,36 @@
-# Actualizaciones de dependencias agrupadas por semana: un PR por ecosistema, no decenas.
+# Actualizaciones semanales agrupadas: un PR por ecosistema con parches y versiones menores.
+# Las versiones mayores (Node, NestJS, proveedor de AWS…) se actualizan a mano, con su propio PR y pruebas.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
     schedule: { interval: weekly, day: monday }
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
     groups:
-      produccion:
-        dependency-type: production
-        update-types: [minor, patch]
-      desarrollo:
-        dependency-type: development
+      npm:
+        patterns: ['*']
         update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly, day: monday }
+    groups:
+      acciones:
+        patterns: ['*']
   - package-ecosystem: docker
     directories: [/services/ledger, /services/assistant, /apps/web, /automation/n8n]
     schedule: { interval: weekly, day: monday }
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
+    groups:
+      imagenes:
+        patterns: ['*']
   - package-ecosystem: terraform
     directories: [/infra/terraform/envs/dev]
     schedule: { interval: weekly, day: monday }
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
