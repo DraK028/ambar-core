@@ -1,0 +1,22 @@
+{
+  "name": "@ambar/event-forwarder",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lambda: eventos del core (EventBridge → SQS) hacia los webhooks de n8n, firmados con HMAC",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "esbuild src/handler.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/index.js --external:@aws-sdk/* --sourcemap --legal-comments=none",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ambar/events": "*"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.1141.0",
+    "@types/node": "^22.15.0",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.8.0",
+    "vitest": "^5.0.2"
+  }
+}

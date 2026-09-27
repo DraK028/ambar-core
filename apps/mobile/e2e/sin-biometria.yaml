@@ -1,0 +1,38 @@
+# Flujo sin biometría: el usuario omite la activación. La política del core debe exigir
+# step-up para un beneficiario nuevo y la app debe explicar que hace falta activar la biometría.
+appId: mx.ambar.banca
+env:
+  SUB: e2e-sinbio
+  DEST_CLABE: "999180000000000028"
+---
+- launchApp:
+    clearState: true
+    clearKeychain: true
+- tapOn:
+    id: local-user
+- eraseText
+- inputText: ${SUB}
+- tapOn:
+    id: login
+- assertVisible: Activa tu huella o tu rostro
+- tapOn:
+    id: omitir
+- assertVisible: Saldo disponible
+- tapOn:
+    id: tab-transferir
+- tapOn:
+    id: clabe
+- inputText: ${DEST_CLABE}
+- tapOn:
+    id: monto
+- inputText: "10"
+- tapOn:
+    id: concepto
+- inputText: Prueba sin biometria
+- hideKeyboard
+- tapOn:
+    id: continuar
+- assertVisible: Confirma tu transferencia
+- tapOn:
+    id: confirmar
+- assertVisible: .*activar la biometría.*

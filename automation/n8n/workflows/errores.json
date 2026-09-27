@@ -1,0 +1,132 @@
+{
+  "id": "AmbarErrores0001",
+  "name": "Ámbar · Errores de automatización",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "3effbdde-1811-5b8a-a13d-464089f0fc24",
+      "name": "Falla de un flujo",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const e = $input.first().json;\nconst text = `❌ Falló \"${e.workflow?.name}\" en el nodo \"${e.execution?.lastNodeExecuted}\": ` +\n  `${(e.execution?.error?.message || 'sin mensaje').slice(0, 300)} (ejecución ${e.execution?.id ?? 'n/d'}).`;\nreturn [{ json: { alert: Boolean($env.OPS_WEBHOOK_URL), text } }];\n"
+      },
+      "id": "c254cbe0-9557-58c0-b633-eeb59e1402b9",
+      "name": "Redactar alerta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "634b10e8-6b10-5e9b-9988-338074b191d7",
+              "leftValue": "={{ $json.alert }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "db134629-3bc2-53c1-bd9a-5a13118ca8d1",
+      "name": "¿Alertar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.OPS_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "4c1ce8dc-3c20-58ad-aca1-56ddf11d8d69",
+      "name": "Alertar a operación",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        660,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Falla de un flujo": {
+      "main": [
+        [
+          {
+            "node": "Redactar alerta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Redactar alerta": {
+      "main": [
+        [
+          {
+            "node": "¿Alertar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Alertar?": {
+      "main": [
+        [
+          {
+            "node": "Alertar a operación",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Mexico_City",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": false
+  },
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

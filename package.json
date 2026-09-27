@@ -1,0 +1,32 @@
+{
+  "name": "ambar",
+  "private": true,
+  "description": "Ámbar.core — sistema bancario core omnicanal (proyecto de portafolio)",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "test:unit": "turbo run test:unit",
+    "test:integration": "turbo run test:integration",
+    "lint:contract": "npm run lint -w @ambar/api-contract",
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
+    "login:dev": "node tools/cognito-login.mjs"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.0"
+  },
+  "packageManager": "npm@10.9.7",
+  "engines": {
+    "node": ">=22"
+  },
+  "overrides": {
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native-worklets": "0.10.1"
+  }
+}

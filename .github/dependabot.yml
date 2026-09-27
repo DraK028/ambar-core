@@ -1,0 +1,23 @@
+# Actualizaciones de dependencias agrupadas por semana: un PR por ecosistema, no decenas.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    groups:
+      produccion:
+        dependency-type: production
+        update-types: [minor, patch]
+      desarrollo:
+        dependency-type: development
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+  - package-ecosystem: docker
+    directories: [/services/ledger, /services/assistant, /apps/web, /automation/n8n]
+    schedule: { interval: weekly, day: monday }
+  - package-ecosystem: terraform
+    directories: [/infra/terraform/envs/dev]
+    schedule: { interval: weekly, day: monday }

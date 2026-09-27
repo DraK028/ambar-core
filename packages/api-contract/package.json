@@ -1,0 +1,21 @@
+{
+  "name": "@ambar/api-contract",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Contrato OpenAPI 3.1 del core Ámbar (fuente de verdad)",
+  "main": "index.js",
+  "files": [
+    "openapi.yaml",
+    "index.js",
+    "index.d.ts"
+  ],
+  "scripts": {
+    "lint": "spectral lint openapi.yaml --fail-severity=warn",
+    "mock": "prism mock openapi.yaml --port 4010"
+  },
+  "devDependencies": {
+    "@stoplight/prism-cli": "^5.14.0",
+    "@stoplight/spectral-cli": "^6.15.0"
+  },
+  "types": "index.d.ts"
+}

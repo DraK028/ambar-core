@@ -1,0 +1,13 @@
+owner              = "jose-carlos"
+github_repository  = "tu-usuario/ambar"
+monthly_budget_usd = 80
+budget_alert_email = "tu-correo@ejemplo.com"
+enable_waf         = false
+
+# Asistente (fase 5): id o perfil de inferencia de Bedrock con tool use, habilitado en tu cuenta.
+# aws bedrock list-inference-profiles --query 'inferenceProfileSummaries[].inferenceProfileId'
+assistant_model_id = "<perfil-de-inferencia>"
+
+# Opcional: dominio propio con TLS de punta a punta (web, API y NLB interno).
+# domain_name     = "ambar.midominio.com"
+# route53_zone_id = "Z0123456789ABCDEFGHIJ"

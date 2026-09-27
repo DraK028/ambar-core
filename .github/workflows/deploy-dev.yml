@@ -1,0 +1,311 @@
+name: Deploy dev
+
+# Construye la imagen, corre migraciones como tarea única y actualiza los servicios:
+# Ledger y relay del outbox (misma imagen), banca web, Lambda forwarder y n8n.
+# Se activa con la variable DEPLOY_ENABLED=true. Requiere (Settings → Secrets and variables → Actions):
+#   secreto   AWS_DEPLOY_ROLE_ARN     → output deploy_role_arn de Terraform
+#   variables las del output github_variables, más API_URL (output api_url) y WEB_URL (output web_url)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - services/ledger/**
+      - services/event-forwarder/**
+      - services/assistant/**
+      - packages/events/**
+      - automation/n8n/**
+      - apps/web/**
+      - packages/api-contract/**
+      - packages/api-client/**
+      - package-lock.json
+      - .github/workflows/deploy-dev.yml
+
+permissions:
+  contents: read
+  id-token: write # token OIDC para asumir el rol de despliegue
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false # nunca cortar un despliegue a la mitad
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+  IMAGE: ${{ vars.ECR_REPOSITORY_URL }}:${{ github.sha }}
+
+jobs:
+  test:
+    name: Pruebas
+    # Apagado hasta que exista la infraestructura: define la variable DEPLOY_ENABLED=true en el
+    # repositorio (Settings → Secrets and variables → Actions → Variables) después de terraform apply.
+    # Mientras tanto el workflow se salta sin fallar, y los demás jobs dependen de este.
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:cov -w @ambar/ledger -- --runInBand
+      - run: npm run test -w @ambar/web
+      - run: npm test -w @ambar/events && npm test -w @ambar/event-forwarder
+      - run: node automation/n8n/check-workflows.mjs
+      - run: npm test -w @ambar/assistant
+
+  deploy:
+    name: Desplegar Ledger
+    needs: test
+    runs-on: ubuntu-latest
+    # Sin `environment:` a propósito: con él, el claim sub del token OIDC cambia a
+    # repo:<repo>:environment:<env> y ya no coincidiría con la confianza del rol (rama main).
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Construir y publicar imagen
+        run: |
+          docker build -f services/ledger/Dockerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Migraciones (tarea única en ECS)
+        env:
+          FAMILY: ${{ vars.MIGRATE_TASK_FAMILY }}
+          SUBNETS: ${{ vars.PRIVATE_SUBNETS }}
+          SG: ${{ vars.TASK_SECURITY_GROUP }}
+        run: |
+          set -euo pipefail
+          aws ecs describe-task-definition --task-definition "$FAMILY" --query taskDefinition \
+            | jq --arg img "$IMAGE" '
+                .containerDefinitions[0].image = $img
+                | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                      .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)' \
+            > migrate-td.json
+          ARN=$(aws ecs register-task-definition --cli-input-json file://migrate-td.json \
+                  --query taskDefinition.taskDefinitionArn --output text)
+
+          TASK=$(aws ecs run-task --cluster "$ECS_CLUSTER" --task-definition "$ARN" --launch-type FARGATE \
+                   --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SG],assignPublicIp=DISABLED}" \
+                   --query 'tasks[0].taskArn' --output text)
+          echo "Tarea de migraciones: $TASK"
+          aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$TASK"
+
+          CODE=$(aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$TASK" \
+                   --query 'tasks[0].containers[0].exitCode' --output text)
+          if [ "$CODE" != "0" ]; then
+            REASON=$(aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$TASK" --query 'tasks[0].stoppedReason' --output text)
+            echo "::error::Las migraciones fallaron (exit $CODE: $REASON). Revisa /ecs/*/ledger en CloudWatch, prefijo migrate."
+            exit 1
+          fi
+
+      - name: Preparar task definition del servicio
+        run: |
+          aws ecs describe-task-definition --task-definition "${{ vars.LEDGER_TASK_FAMILY }}" \
+            --query taskDefinition > ledger-td.json
+
+      - id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ledger-td.json
+          container-name: ledger
+          image: ${{ env.IMAGE }}
+
+      - name: Actualizar servicio (espera a que esté estable; si falla, ECS revierte)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          service: ${{ vars.ECS_SERVICE }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+      - name: Relay del outbox con la misma imagen
+        run: |
+          set -euo pipefail
+          aws ecs describe-task-definition --task-definition "${{ vars.RELAY_TASK_FAMILY }}" --query taskDefinition \
+            | jq --arg img "$IMAGE" '
+                .containerDefinitions[0].image = $img
+                | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                      .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)' > relay-td.json
+          ARN=$(aws ecs register-task-definition --cli-input-json file://relay-td.json \
+                  --query taskDefinition.taskDefinitionArn --output text)
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "${{ vars.RELAY_SERVICE }}" --task-definition "$ARN" > /dev/null
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "${{ vars.RELAY_SERVICE }}"
+
+      - name: Prueba de humo a través de API Gateway
+        run: |
+          set -euo pipefail
+          curl -fsS "${{ vars.API_URL }}/health" | tee /dev/stderr | grep -q '"status":"ok"'
+          # Sin token, el gateway debe responder 401 en formato problem+json.
+          STATUS=$(curl -s -o body.json -w '%{http_code}' "${{ vars.API_URL }}/v1/accounts")
+          test "$STATUS" = "401" && grep -q '"code":"UNAUTHENTICATED"' body.json
+          # La API interna no existe hacia afuera, ni siquiera con token.
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${{ vars.API_URL }}/v1/internal/notifications")
+          test "$STATUS" = "404"
+
+  deploy-assistant:
+    name: Desplegar asistente
+    needs: deploy
+    runs-on: ubuntu-latest
+    env:
+      ASSISTANT_IMAGE: ${{ vars.ASSISTANT_ECR }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Construir y publicar imagen
+        run: |
+          docker build -f services/assistant/Dockerfile -t "$ASSISTANT_IMAGE" .
+          docker push "$ASSISTANT_IMAGE"
+
+      - name: Preparar task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "${{ vars.ASSISTANT_FAMILY }}" \
+            --query taskDefinition > assistant-td.json
+
+      - id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: assistant-td.json
+          container-name: assistant
+          image: ${{ env.ASSISTANT_IMAGE }}
+
+      - name: Actualizar servicio
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          service: ${{ vars.ASSISTANT_SERVICE }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+      - name: Prueba de humo a través de API Gateway
+        run: |
+          set -euo pipefail
+          # Sin token: 401 del gateway, en formato problem+json.
+          STATUS=$(curl -s -o body.json -w '%{http_code}' -X POST "${{ vars.API_URL }}/v1/assistant/messages" \
+                     -H 'content-type: application/json' -d '{"message":"hola"}')
+          test "$STATUS" = "401" && grep -q '"code":"UNAUTHENTICATED"' body.json
+
+  deploy-automation:
+    name: Desplegar automatización (forwarder y n8n)
+    needs: deploy # los flujos llaman a la API interna de esta versión del core
+    runs-on: ubuntu-latest
+    env:
+      N8N_IMAGE: ${{ vars.N8N_ECR_REPOSITORY }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Lambda forwarder
+        run: |
+          set -euo pipefail
+          npm run build -w @ambar/event-forwarder
+          (cd services/event-forwarder/dist && zip -q ../forwarder.zip index.js)
+          aws lambda update-function-code --function-name "${{ vars.FORWARDER_FUNCTION }}" \
+            --zip-file fileb://services/event-forwarder/forwarder.zip > /dev/null
+          aws lambda wait function-updated-v2 --function-name "${{ vars.FORWARDER_FUNCTION }}"
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Imagen de n8n con los flujos
+        run: |
+          docker build -f automation/n8n/Dockerfile -t "$N8N_IMAGE" .
+          docker push "$N8N_IMAGE"
+
+      - name: Preparar task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "${{ vars.N8N_TASK_FAMILY }}" \
+            --query taskDefinition > n8n-td.json
+
+      - id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: n8n-td.json
+          container-name: n8n
+          image: ${{ env.N8N_IMAGE }}
+
+      - name: Actualizar n8n
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          service: ${{ vars.N8N_SERVICE }}
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+
+  deploy-web:
+    name: Desplegar Banca Web
+    needs: deploy # la web se publica cuando el core con la nueva versión del contrato ya está arriba
+    runs-on: ubuntu-latest
+    env:
+      WEB_IMAGE: ${{ vars.WEB_ECR_REPOSITORY }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Construir y publicar imagen
+        run: |
+          docker build -f apps/web/Dockerfile -t "$WEB_IMAGE" .
+          docker push "$WEB_IMAGE"
+
+      - name: Preparar task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "${{ vars.WEB_TASK_FAMILY }}" \
+            --query taskDefinition > web-td.json
+
+      - id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: web-td.json
+          container-name: web
+          image: ${{ env.WEB_IMAGE }}
+
+      - name: Actualizar servicio
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          service: ${{ vars.WEB_SERVICE }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+      - name: Prueba de humo a través de CloudFront
+        run: |
+          set -euo pipefail
+          curl -fsS "${{ vars.WEB_URL }}/api/health" | grep -q '"status":"ok"'
+          # /entrar debe responder con CSP y sin caché
+          curl -fsSI "${{ vars.WEB_URL }}/entrar" | tee headers.txt
+          grep -qi "content-security-policy: .*nonce-" headers.txt
+          grep -qi "cache-control: .*no-store" headers.txt

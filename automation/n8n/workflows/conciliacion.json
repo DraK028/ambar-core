@@ -1,0 +1,202 @@
+{
+  "id": "AmbarConciliacio",
+  "name": "Ámbar · Conciliación diaria",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "b1671fe1-aca0-5664-ba3a-64f81c57d3b3",
+      "name": "Diario 06:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "71817111-fe73-55c3-b535-e75fb652118a",
+      "name": "A demanda",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.AMBAR_CORE_URL }}/v1/internal/reconciliation",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "2ba7373d-5b37-57d5-bcc9-2c398d850276",
+      "name": "Consultar conciliación",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        220,
+        300
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "AmbarCoreM2M0001",
+          "name": "Ámbar core (client credentials)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $input.first().json;\nconst problems = [];\nif (r.ledger.drift.length) problems.push(`${r.ledger.drift.length} cuenta(s) con saldo distinto a sus movimientos`);\nif (r.ledger.ledger_total !== 0) problems.push(`el ledger no suma cero (${r.ledger.ledger_total})`);\nif (r.outbox.dead) problems.push(`${r.outbox.dead} evento(s) muertos en el outbox`);\nif (r.outbox.oldest_pending_seconds > 300) problems.push(`eventos sin publicar desde hace ${r.outbox.oldest_pending_seconds} s`);\nconst ok = r.ok && problems.length === 0;\nconst text = ok\n  ? `✅ Conciliación ${r.checked_at}: ${r.ledger.accounts_checked} cuentas cuadradas; outbox al día.`\n  : `⚠️ Conciliación ${r.checked_at}: ${problems.join('; ') || 'revisar el reporte'}.`;\nreturn [{ json: { ok, alert: !ok && Boolean($env.OPS_WEBHOOK_URL), text, report: r } }];\n"
+      },
+      "id": "38823b60-375d-55ed-9007-bd6c52b13801",
+      "name": "Evaluar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "27cb6646-a74e-5418-b051-fd15981b650e",
+              "leftValue": "={{ $json.alert }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4b676f97-2db7-53a7-9e3c-2eb0f986f2d0",
+      "name": "¿Alertar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.OPS_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "ab27c99b-f0b2-585c-9179-f52e8f3d9a93",
+      "name": "Alertar a operación",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        880,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Diario 06:00": {
+      "main": [
+        [
+          {
+            "node": "Consultar conciliación",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consultar conciliación": {
+      "main": [
+        [
+          {
+            "node": "Evaluar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluar": {
+      "main": [
+        [
+          {
+            "node": "¿Alertar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A demanda": {
+      "main": [
+        [
+          {
+            "node": "Consultar conciliación",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Alertar?": {
+      "main": [
+        [
+          {
+            "node": "Alertar a operación",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Mexico_City",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": false,
+    "errorWorkflow": "AmbarErrores0001"
+  },
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

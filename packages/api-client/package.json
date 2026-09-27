@@ -1,0 +1,20 @@
+{
+  "name": "@ambar/api-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tipos y cliente fetch generados desde el contrato OpenAPI de Ámbar",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "generate": "openapi-typescript ../api-contract/openapi.yaml -o src/schema.d.ts",
+    "check": "openapi-typescript ../api-contract/openapi.yaml -o .schema.check.d.ts && diff -q src/schema.d.ts .schema.check.d.ts && rm .schema.check.d.ts && echo 'Cliente al día con el contrato'"
+  },
+  "dependencies": {
+    "openapi-fetch": "^0.17.0"
+  },
+  "devDependencies": {
+    "@ambar/api-contract": "*",
+    "openapi-typescript": "^7.13.0",
+    "typescript": "^5.8.0"
+  }
+}

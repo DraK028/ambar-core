@@ -1,0 +1,23 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'mx.ambar.devicekey'
+version = '0.1.0'
+
+android {
+  namespace "mx.ambar.devicekey"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  // BiometricPrompt con CryptoObject: la firma solo ocurre tras autenticación biométrica fuerte.
+  implementation "androidx.biometric:biometric:1.1.0"
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@ambar/banking-rules",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Montos en centavos y CLABE: reglas compartidas por web y móvil",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "vitest": "^5.0.2"
+  }
+}

@@ -1,0 +1,346 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Contrato OpenAPI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Lint con Spectral (reglas de Ámbar incluidas)
+        run: npm run lint -w @ambar/api-contract
+
+  ledger:
+    name: Ledger · pruebas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Compilar
+        run: npm run build -w @ambar/ledger
+      - name: Unitarias, integración y e2e (Testcontainers con Postgres 16)
+        run: npm run test:cov -w @ambar/ledger -- --runInBand
+      - name: Dependencias de producción sin vulnerabilidades altas
+        run: npm audit --omit=dev --audit-level=high
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-ledger
+          path: services/ledger/coverage
+          retention-days: 14
+
+  web:
+    name: Banca Web · pruebas y E2E
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ambar
+          POSTGRES_PASSWORD: ambar_local
+          POSTGRES_DB: ambar
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ambar -d ambar"
+          --health-interval 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: El cliente de la API está al día con el contrato
+        run: npm run check -w @ambar/api-client
+      - name: Tipos
+        run: npm run typecheck -w @ambar/web
+      - name: Unitarias (sesión, OIDC, montos, CLABE)
+        run: npm run test -w @ambar/web
+      - name: Compilar Ledger, Asistente y Web
+        run: |
+          npm run build -w @ambar/ledger
+          npm run build -w @ambar/assistant
+          npm run build -w @ambar/web
+      - name: Instalar Chromium
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+      - name: E2E con Playwright y axe-core (Postgres + Ledger + Asistente + Web)
+        run: npm run e2e -w @ambar/web
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report
+          retention-days: 14
+
+  mobile:
+    name: App móvil · tipos, pruebas y bundle
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ambar
+          POSTGRES_PASSWORD: ambar_local
+          POSTGRES_DB: ambar
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ambar -d ambar"
+          --health-interval 5s
+          --health-retries 12
+    env:
+      LOCAL_JWT_SECRET: ci-local-secret-with-at-least-32-characters
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Reglas compartidas (montos y CLABE)
+        run: npm run test -w @ambar/banking-rules
+      - name: Tipos de la app y del módulo nativo (TS)
+        run: npm run typecheck -w @ambar/mobile
+      - name: Levantar el Ledger para la prueba del flujo móvil
+        run: |
+          npm run build -w @ambar/ledger
+          cd services/ledger
+          DATABASE_URL=postgres://ambar:ambar_local@localhost:5432/ambar MIGRATE_ON_START=true \
+            ENABLE_QA_ENDPOINTS=true PORT=3000 nohup node dist/main.js > ledger.log 2>&1 &
+          npx wait-on -t 60000 http://localhost:3000/health
+      - name: Unitarias + flujo de step-up contra el Ledger real (llave P-256 de software)
+        run: npm run test -w @ambar/mobile
+        env:
+          LEDGER_URL: http://localhost:3000
+      - name: Bundle de Android e iOS con Metro (sin compilar código nativo)
+        run: npm run bundle:check -w @ambar/mobile
+
+  assistant:
+    name: Asistente · pruebas, seguridad y evaluaciones
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ambar
+          POSTGRES_PASSWORD: ambar_local
+          POSTGRES_DB: ambar
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ambar -d ambar"
+          --health-interval 5s
+          --health-retries 12
+    env:
+      LOCAL_JWT_SECRET: ci-local-secret-with-at-least-32-characters
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Tipos y compilación
+        run: |
+          npm run typecheck -w @ambar/assistant
+          npm run build -w @ambar/assistant
+      - name: Levantar el Ledger para las pruebas contra datos reales
+        run: |
+          npm run build -w @ambar/ledger
+          DATABASE_URL=postgres://ambar:ambar_local@localhost:5432/ambar MIGRATE_ON_START=true ENABLE_QA_ENDPOINTS=true \
+            PORT=3000 nohup node services/ledger/dist/main.js > ledger.log 2>&1 &
+          npx wait-on -t 60000 http://localhost:3000/health
+      - name: Unitarias, adversariales (prompt injection), e2e HTTP y contra el Ledger real
+        run: npm run test:cov -w @ambar/assistant
+        env:
+          LEDGER_URL: http://localhost:3000
+      - name: Evaluaciones (línea base con el modelo guionado)
+        run: npm run evals -w @ambar/assistant
+
+  events:
+    name: Eventos · sobre, forwarder y flujos de n8n
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Sobre de eventos y firma HMAC
+        run: npm test -w @ambar/events
+      - name: Forwarder (Lambda) · tipos, pruebas y bundle
+        run: |
+          npm run typecheck -w @ambar/event-forwarder
+          npm test -w @ambar/event-forwarder
+          npm run build -w @ambar/event-forwarder
+      - name: Flujos de n8n coinciden con las rutas y las colas de Terraform
+        run: node automation/n8n/check-workflows.mjs
+
+  automation:
+    name: Automatización · E2E con n8n real
+    runs-on: ubuntu-latest
+    needs: events
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ambar
+          POSTGRES_PASSWORD: ambar_local
+          POSTGRES_DB: ambar
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ambar -d ambar"
+          --health-interval 5s
+          --health-retries 12
+    env:
+      LOCAL_JWT_SECRET: ci-local-secret-with-at-least-32-characters
+      N8N_CLIENT_SECRET: ci-n8n-client-secret-0123456789
+      WEBHOOK_SIGNING_SECRET: ci-webhook-signing-secret-0123456789abcdef
+      OPS_WEBHOOK_URL: http://127.0.0.1:9999/ops
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # n8n 2.x
+          cache: npm
+      - run: npm ci
+      - name: Instalar n8n 2.40.7
+        run: npm install -g n8n@2.40.7
+      - name: Levantar Ledger, tokens de desarrollo y captura de alertas
+        run: |
+          npm run build -w @ambar/ledger
+          DATABASE_URL=postgres://ambar:ambar_local@localhost:5432/ambar MIGRATE_ON_START=true ENABLE_QA_ENDPOINTS=true \
+            INTERNAL_CLIENT_IDS=n8n-local PORT=3000 nohup node services/ledger/dist/main.js > ledger.log 2>&1 &
+          nohup node tools/dev-auth-server.mjs > auth.log 2>&1 &
+          nohup node tools/ops-capture.mjs "$RUNNER_TEMP/ops.jsonl" > ops.log 2>&1 &
+          npx wait-on -t 60000 http://localhost:3000/health
+      - name: Levantar n8n con los flujos del repositorio
+        run: |
+          nohup sh automation/n8n/run-local.sh > n8n.log 2>&1 &
+          npx wait-on -t 180000 http://127.0.0.1:5678/healthz
+      - name: Levantar el relay del outbox (modo webhook)
+        run: |
+          DATABASE_URL=postgres://ambar:ambar_local@localhost:5432/ambar RELAY_PUBLISHER=webhook \
+            N8N_WEBHOOK_BASE_URL=http://127.0.0.1:5678 RELAY_POLL_MS=1000 nohup node services/ledger/dist/relay/main.js > relay.log 2>&1 &
+          npx wait-on -t 30000 http://127.0.0.1:3001/health
+      - name: Onboarding → movimientos → fraude → congelamiento → alerta
+        run: node automation/n8n/e2e-local.mjs
+        env:
+          OPS_CAPTURE_FILE: ${{ runner.temp }}/ops.jsonl
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: automation-logs
+          path: '*.log'
+          retention-days: 7
+
+  image:
+    name: Ledger · imagen Docker
+    runs-on: ubuntu-latest
+    needs: ledger
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construir imagen
+        run: docker build -f services/ledger/Dockerfile -t ambar-ledger:${{ github.sha }} .
+      - name: Escanear imagen con Trivy
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ambar-ledger:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+
+  web-image:
+    name: Banca Web · imagen Docker
+    runs-on: ubuntu-latest
+    needs: web
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construir imagen
+        run: docker build -f apps/web/Dockerfile -t ambar-web:${{ github.sha }} .
+      - name: Escanear imagen con Trivy
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ambar-web:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+
+  assistant-image:
+    name: Asistente · imagen Docker
+    runs-on: ubuntu-latest
+    needs: assistant
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construir imagen
+        run: docker build -f services/assistant/Dockerfile -t ambar-assistant:${{ github.sha }} .
+      - name: Escanear imagen con Trivy
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ambar-assistant:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+
+  n8n-image:
+    name: n8n · imagen Docker
+    runs-on: ubuntu-latest
+    needs: events
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construir imagen
+        run: docker build -f automation/n8n/Dockerfile -t ambar-n8n:${{ github.sha }} .
+      - name: Escanear imagen con Trivy (informativo; la base es la imagen oficial de n8n)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ambar-n8n:${{ github.sha }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.3
+      - name: Formato
+        run: terraform fmt -check -recursive
+      - name: Validar entorno dev
+        working-directory: infra/terraform/envs/dev
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+      - name: Escanear configuración con Trivy
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: config
+          scan-ref: infra/terraform
+          severity: CRITICAL,HIGH
+          exit-code: '0'

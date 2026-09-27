@@ -1,0 +1,12 @@
+{
+  "name": "@ambar/events",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sobre de eventos del core, firma HMAC de webhooks y rutas hacia los flujos de n8n",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts", "asyncapi.yaml"],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

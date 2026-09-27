@@ -1,0 +1,29 @@
+extends:
+  - spectral:oas
+
+rules:
+  # Toda operación debe declarar un operationId (se usa para generar el cliente).
+  operation-operationId: error
+  # Los montos siempre son enteros en centavos, nunca number.
+  ambar-amounts-are-integers:
+    description: Los campos amount/balance deben ser enteros (centavos).
+    severity: error
+    given: "$..properties[?(@property === 'amount' || @property === 'balance')]"
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          anyOf:
+            - required: [$ref]
+            - properties:
+                type:
+                  const: integer
+              required: [type]
+  # Toda operación POST que mueve dinero debe exigir Idempotency-Key.
+  ambar-post-requires-idempotency-key:
+    description: Los POST de transferencias, reversos y depósitos requieren Idempotency-Key.
+    severity: error
+    given: "$.paths[?(@property.match(/transfers|reversals|deposits/))].post"
+    then:
+      field: parameters
+      function: truthy

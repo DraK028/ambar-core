@@ -1,0 +1,272 @@
+asyncapi: 3.0.0
+info:
+  title: Eventos del core Ámbar
+  version: 0.1.0
+  description: |
+    Eventos de dominio que el core escribe en `ledger.outbox` en la misma transacción que el
+    cambio de negocio. El relay los publica en EventBridge (`Source: ambar.core`,
+    `DetailType: <type>`); cada flujo de n8n tiene su cola SQS y recibe el sobre por webhook.
+
+    Garantías y reglas para consumidores:
+    - Entrega **al menos una vez**: deduplica por `id`.
+    - Sin orden global: un evento reintentado puede llegar después de otros más nuevos.
+    - Montos en centavos (enteros). Los eventos no llevan nombres, correos ni CLABE completas.
+    - Hacia n8n, cada entrega va firmada:
+      `Ambar-Signature: t=<unix>,v1=<hex(HMAC-SHA256(secreto, t + "." + cuerpo))>`
+      (tolerancia de 5 minutos; se aceptan varias firmas v1 durante una rotación).
+  license:
+    name: MIT
+
+defaultContentType: application/json
+
+servers:
+  eventbridge:
+    host: events.us-east-1.amazonaws.com
+    protocol: https
+    description: Bus `ambar-<env>-core` de EventBridge (archivo de 30 días para replay).
+  n8n:
+    host: n8n.ambar-dev.internal:5678
+    protocol: http
+    description: Webhooks de n8n dentro de la VPC (solo el forwarder puede llamarlos).
+
+channels:
+  core:
+    address: ambar.core
+    servers: [{ $ref: '#/servers/eventbridge' }]
+    description: Todos los eventos del core.
+    messages:
+      accountOpened: { $ref: '#/components/messages/accountOpened' }
+      accountFrozen: { $ref: '#/components/messages/accountFrozen' }
+      accountUnfrozen: { $ref: '#/components/messages/accountUnfrozen' }
+      transferPosted: { $ref: '#/components/messages/transferPosted' }
+      depositPosted: { $ref: '#/components/messages/depositPosted' }
+      entryReversed: { $ref: '#/components/messages/entryReversed' }
+      deviceRegistered: { $ref: '#/components/messages/deviceRegistered' }
+      deviceRevoked: { $ref: '#/components/messages/deviceRevoked' }
+      fraudCaseAnswered: { $ref: '#/components/messages/fraudCaseAnswered' }
+  onboarding:
+    address: /webhook/onboarding
+    servers: [{ $ref: '#/servers/n8n' }]
+    messages:
+      accountOpened: { $ref: '#/components/messages/accountOpened' }
+  movimientos:
+    address: /webhook/movimientos
+    servers: [{ $ref: '#/servers/n8n' }]
+    messages:
+      transferPosted: { $ref: '#/components/messages/transferPosted' }
+      depositPosted: { $ref: '#/components/messages/depositPosted' }
+  alertaFraude:
+    address: /webhook/alerta-fraude
+    servers: [{ $ref: '#/servers/n8n' }]
+    messages:
+      transferPosted: { $ref: '#/components/messages/transferPosted' }
+  fraudeRespuesta:
+    address: /webhook/fraude-respuesta
+    servers: [{ $ref: '#/servers/n8n' }]
+    messages:
+      fraudCaseAnswered: { $ref: '#/components/messages/fraudCaseAnswered' }
+
+operations:
+  publishCoreEvents:
+    action: send
+    channel: { $ref: '#/channels/core' }
+    summary: El relay del outbox publica en EventBridge.
+  deliverOnboarding:
+    action: send
+    channel: { $ref: '#/channels/onboarding' }
+    summary: Bienvenida al abrir la cuenta.
+  deliverMovimientos:
+    action: send
+    channel: { $ref: '#/channels/movimientos' }
+    summary: Avisos a quien envía y a quien recibe.
+  deliverAlertaFraude:
+    action: send
+    channel: { $ref: '#/channels/alertaFraude' }
+    summary: Si risk.score ≥ umbral, n8n abre un caso y el cliente confirma en la app.
+  deliverFraudeRespuesta:
+    action: send
+    channel: { $ref: '#/channels/fraudeRespuesta' }
+    summary: Aviso al cliente y alerta a operación si no reconoce la transferencia.
+
+components:
+  messages:
+    accountOpened:
+      name: account.opened
+      headers: { $ref: '#/components/schemas/WebhookHeaders' }
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - properties:
+              data:
+                type: object
+                required: [account_id, owner_id, occurred_at]
+                properties:
+                  account_id: { $ref: '#/components/schemas/Uuid' }
+                  owner_id: { type: string, description: 'sub de Cognito (no es un dato personal).' }
+                  occurred_at: { $ref: '#/components/schemas/Timestamp' }
+    accountFrozen:
+      name: account.frozen
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - properties:
+              data:
+                type: object
+                required: [account_id, owner_id, reason, occurred_at]
+                properties:
+                  account_id: { $ref: '#/components/schemas/Uuid' }
+                  owner_id: { type: string }
+                  reason: { type: string, enum: [FRAUD_NOT_RECOGNIZED] }
+                  fraud_case_id: { $ref: '#/components/schemas/Uuid' }
+                  occurred_at: { $ref: '#/components/schemas/Timestamp' }
+    accountUnfrozen:
+      name: account.unfrozen
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - properties:
+              data:
+                type: object
+                required: [account_id, actor, reason, occurred_at]
+                properties:
+                  account_id: { $ref: '#/components/schemas/Uuid' }
+                  owner_id: { type: string }
+                  actor: { type: string, description: 'Operador que la liberó.' }
+                  reason: { type: string }
+                  occurred_at: { $ref: '#/components/schemas/Timestamp' }
+    transferPosted:
+      name: transfer.posted
+      headers: { $ref: '#/components/schemas/WebhookHeaders' }
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - properties:
+              data:
+                type: object
+                required: [entry_id, source_account_id, destination_account_id, amount, currency, risk, occurred_at]
+                properties:
+                  entry_id: { $ref: '#/components/schemas/Uuid' }
+                  source_account_id: { $ref: '#/components/schemas/Uuid' }
+                  destination_account_id: { $ref: '#/components/schemas/Uuid' }
+                  amount: { $ref: '#/components/schemas/Amount' }
+                  currency: { type: string, const: MXN }
+                  risk: { $ref: '#/components/schemas/Risk' }
+                  occurred_at: { $ref: '#/components/schemas/Timestamp' }
+    depositPosted:
+      name: deposit.posted
+      headers: { $ref: '#/components/schemas/WebhookHeaders' }
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - properties:
+              data:
+                type: object
+                required: [entry_id, account_id, amount, currency, occurred_at]
+                properties:
+                  entry_id: { $ref: '#/components/schemas/Uuid' }
+                  account_id: { $ref: '#/components/schemas/Uuid' }
+                  amount: { $ref: '#/components/schemas/Amount' }
+                  currency: { type: string, const: MXN }
+                  occurred_at: { $ref: '#/components/schemas/Timestamp' }
+    entryReversed:
+      name: entry.reversed
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - properties:
+              data:
+                type: object
+                required: [entry_id, reverses_id, reason, occurred_at]
+                properties:
+                  entry_id: { $ref: '#/components/schemas/Uuid' }
+                  reverses_id: { $ref: '#/components/schemas/Uuid' }
+                  reason: { type: string }
+                  occurred_at: { $ref: '#/components/schemas/Timestamp' }
+    deviceRegistered:
+      name: device.registered
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - properties:
+              data:
+                type: object
+                required: [device_id, owner_id, platform, occurred_at]
+                properties:
+                  device_id: { $ref: '#/components/schemas/Uuid' }
+                  owner_id: { type: string }
+                  platform: { type: string, enum: [ios, android] }
+                  occurred_at: { $ref: '#/components/schemas/Timestamp' }
+    deviceRevoked:
+      name: device.revoked
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - properties:
+              data:
+                type: object
+                required: [device_id, owner_id, occurred_at]
+                properties:
+                  device_id: { $ref: '#/components/schemas/Uuid' }
+                  owner_id: { type: string }
+                  occurred_at: { $ref: '#/components/schemas/Timestamp' }
+    fraudCaseAnswered:
+      name: fraud_case.answered
+      headers: { $ref: '#/components/schemas/WebhookHeaders' }
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - properties:
+              data:
+                type: object
+                required: [fraud_case_id, entry_id, account_id, recognized, account_frozen, amount, score, reasons, occurred_at]
+                properties:
+                  fraud_case_id: { $ref: '#/components/schemas/Uuid' }
+                  entry_id: { $ref: '#/components/schemas/Uuid' }
+                  account_id: { $ref: '#/components/schemas/Uuid' }
+                  owner_id: { type: string }
+                  recognized: { type: boolean }
+                  account_frozen: { type: boolean, description: 'El core congela la cuenta en la misma transacción de la respuesta.' }
+                  amount: { $ref: '#/components/schemas/Amount' }
+                  score: { type: integer, minimum: 0, maximum: 100 }
+                  reasons: { type: array, items: { $ref: '#/components/schemas/RiskReason' } }
+                  occurred_at: { $ref: '#/components/schemas/Timestamp' }
+
+  schemas:
+    Envelope:
+      type: object
+      required: [id, type, source, version, occurred_at, aggregate_id, data]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        type: { type: string, examples: [transfer.posted] }
+        source: { type: string, const: ambar.core }
+        version: { type: integer, const: 1 }
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        aggregate_id: { $ref: '#/components/schemas/Uuid' }
+        data: { type: object }
+    WebhookHeaders:
+      type: object
+      required: [ambar-signature, ambar-event-id, ambar-event-type]
+      properties:
+        ambar-signature: { type: string, pattern: '^t=\d+(,v1=[0-9a-f]{64})+$' }
+        ambar-event-id: { $ref: '#/components/schemas/Uuid' }
+        ambar-event-type: { type: string }
+    Risk:
+      type: object
+      required: [score, reasons]
+      description: Puntaje explicable (0–100). n8n abre un caso desde FRAUD_SCORE_THRESHOLD (60).
+      properties:
+        score: { type: integer, minimum: 0, maximum: 100 }
+        reasons: { type: array, items: { $ref: '#/components/schemas/RiskReason' } }
+    RiskReason:
+      type: string
+      enum: [NEW_BENEFICIARY, UNUSUAL_AMOUNT, NIGHT_TIME, HIGH_VELOCITY]
+    Amount:
+      type: integer
+      description: Centavos de MXN.
+      minimum: 1
+    Uuid:
+      type: string
+      format: uuid
+    Timestamp:
+      type: string
+      format: date-time

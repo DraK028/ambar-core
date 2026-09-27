@@ -1,0 +1,44 @@
+{
+  "name": "@ambar/assistant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Asistente financiero de Ámbar: Bedrock con herramientas de solo lectura, sin acceso a la base de datos",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "dev": "tsx watch src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "test:cov": "jest --coverage",
+    "evals": "tsx test/evals/run.ts",
+    "test:live": "jest test/live"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1141.0",
+    "@aws-sdk/client-dynamodb": "^3.1141.0",
+    "@aws-sdk/lib-dynamodb": "^3.1141.0",
+    "@nestjs/common": "^11.1.0",
+    "@nestjs/core": "^11.1.0",
+    "@nestjs/platform-express": "^11.1.0",
+    "jose": "^5.10.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@ambar/api-client": "*",
+    "@ambar/api-contract": "*",
+    "@types/express": "^5.0.6",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.15.0",
+    "@types/supertest": "^6.0.3",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "jest": "^29.7.0",
+    "supertest": "^7.1.0",
+    "ts-jest": "^29.3.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "yaml": "^2.8.0"
+  }
+}

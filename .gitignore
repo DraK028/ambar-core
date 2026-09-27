@@ -1,0 +1,34 @@
+node_modules/
+dist/
+coverage/
+.turbo/
+*.log
+.env
+.env.*
+!.env.example
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+
+# Web
+.next/
+next-env.d.ts
+test-results/
+playwright-report/
+*.tsbuildinfo
+.schema.check.d.ts
+
+# App móvil (Continuous Native Generation: android/ e ios/ se generan con expo prebuild)
+apps/mobile/android/
+apps/mobile/ios/
+apps/mobile/.expo/
+apps/mobile/expo-env.d.ts
+apps/mobile/.export-check/
+apps/mobile/.env
+automation/n8n/.n8n-local/
+.placeholder-forwarder.zip

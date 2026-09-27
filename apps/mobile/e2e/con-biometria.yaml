@@ -1,0 +1,49 @@
+# Flujo completo con biometría en un emulador de Android con huella registrada.
+# run-android.sh toca el sensor virtual (adb emu finger touch) mientras corre este flujo.
+appId: mx.ambar.banca
+env:
+  SUB: e2e-conbio
+  DEST_CLABE: "999180000000000028"
+---
+- launchApp:
+    clearState: true
+    clearKeychain: true
+- tapOn:
+    id: local-user
+- eraseText
+- inputText: ${SUB}
+- tapOn:
+    id: login
+- tapOn:
+    id: activar
+- extendedWaitUntil:
+    visible: Saldo disponible
+    timeout: 20000
+- tapOn:
+    id: tab-transferir
+- tapOn:
+    id: clabe
+- inputText: ${DEST_CLABE}
+- tapOn:
+    id: monto
+- inputText: "6000"
+- tapOn:
+    id: concepto
+- inputText: Enganche
+- hideKeyboard
+- tapOn:
+    id: continuar
+- tapOn:
+    id: confirmar
+- extendedWaitUntil:
+    visible: Transferencia enviada
+    timeout: 20000
+- assertVisible: Confirmada con la biometría de este teléfono.
+# Bloqueo y desbloqueo con biometría
+- tapOn:
+    id: tab-ajustes
+- tapOn:
+    id: bloquear
+- extendedWaitUntil:
+    visible: Saldo disponible
+    timeout: 20000

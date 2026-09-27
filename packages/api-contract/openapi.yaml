@@ -1,0 +1,1336 @@
+openapi: 3.1.0
+info:
+  title: Ámbar Core API
+  version: 0.1.0
+  summary: API del core bancario Ámbar (ledger, transferencias, dispositivos, avisos y fraude).
+  description: |
+    Contrato fuente de verdad del core bancario Ámbar. Todo el código cliente
+    (apps móvil y web) se genera desde este archivo y QA lo usa para el mock server.
+
+    Convenciones:
+    - Montos en **centavos** como enteros (`125050` = $1,250.50 MXN). Nunca decimales.
+    - Toda operación que mueve dinero exige el header `Idempotency-Key` (UUID).
+      Repetir la misma llave con el mismo cuerpo devuelve la respuesta original
+      con `Idempotent-Replayed: true`; con un cuerpo distinto devuelve 409.
+    - Errores en formato RFC 9457 (`application/problem+json`) con un `code` estable.
+    - Un recurso de otro usuario responde 404, no 403, para no revelar que existe.
+  contact:
+    name: José Carlos Bernal Bautista
+    email: josecarlosbernal09@gmail.com
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Local
+  - url: https://api.staging.ambar.example
+    description: Staging (datos sintéticos)
+
+tags:
+  - name: Cuentas
+    description: Cuentas de depósito del cliente autenticado.
+  - name: Transferencias
+    description: Movimientos de dinero entre cuentas.
+  - name: Dispositivos
+    description: Llaves de hardware de la app móvil para confirmar operaciones con biometría.
+  - name: Avisos
+    description: Bandeja de avisos del cliente y casos de posible fraude.
+  - name: Asistente
+    description: |
+      Asistente financiero con IA (servicio aparte). Solo consulta: usa el token del propio
+      usuario contra esta API, recibe datos minimizados y su respuesta pasa por filtros.
+  - name: Ledger
+    description: Operaciones administrativas sobre asientos contables.
+  - name: Interna
+    description: |
+      API para la automatización (n8n). No se publica en API Gateway: se llama dentro de la VPC
+      con un token client_credentials de un cliente máquina autorizado.
+  - name: QA
+    description: Endpoints solo disponibles en local, dev y staging.
+  - name: Sistema
+    description: Salud del servicio.
+
+security:
+  - cognito: []
+
+paths:
+  /health:
+    get:
+      tags: [Sistema]
+      operationId: getHealth
+      summary: Estado del servicio y de la base de datos
+      description: Usada por el health check del ALB y por ECS. No requiere token.
+      security: []
+      responses:
+        '200':
+          description: Servicio sano
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status, database]
+                properties:
+                  status: { type: string, enum: [ok] }
+                  database: { type: string, enum: [ok] }
+
+  /v1/accounts:
+    get:
+      tags: [Cuentas]
+      operationId: listAccounts
+      summary: Lista las cuentas del usuario autenticado
+      description: Devuelve solo las cuentas cuyo dueño es el `sub` del token.
+      security:
+        - cognito: [accounts.read]
+      responses:
+        '200':
+          description: Cuentas del usuario
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Cuentas]
+      operationId: openAccount
+      summary: Abre una cuenta de débito en MXN para el usuario autenticado
+      description: Asigna una CLABE nueva con dígito verificador válido y publica `account.opened` en el outbox.
+      security:
+        - cognito: [accounts.write]
+      responses:
+        '201':
+          description: Cuenta abierta con CLABE asignada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/accounts/{accountId}:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    get:
+      tags: [Cuentas]
+      operationId: getAccount
+      summary: Consulta una cuenta y su saldo
+      description: Si la cuenta pertenece a otro usuario responde 404 (protección BOLA).
+      security:
+        - cognito: [accounts.read]
+      responses:
+        '200':
+          description: Cuenta
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/accounts/{accountId}/movements:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    get:
+      tags: [Cuentas]
+      operationId: listMovements
+      summary: Movimientos de la cuenta, del más reciente al más antiguo
+      description: Paginación por cursor. El monto se expresa desde la perspectiva del cliente.
+      security:
+        - cognito: [accounts.read]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          description: Valor `next_cursor` de la página anterior.
+          schema: { type: string, pattern: '^[0-9]+$' }
+      responses:
+        '200':
+          description: Página de movimientos
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MovementPage' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/transfers:
+    post:
+      tags: [Transferencias]
+      operationId: createTransfer
+      summary: Transfiere dinero a otra cuenta Ámbar identificada por CLABE
+      description: |
+        Fase 1 solo admite destinos dentro de Ámbar. La transferencia se registra
+        en un único asiento de doble partida y en la misma transacción se escribe
+        el evento `transfer.posted` en la tabla outbox.
+
+        **Step-up (app móvil).** Si el monto alcanza el umbral o el destino es nuevo
+        para el usuario, responde 401 con `code: STEP_UP_REQUIRED` y
+        `WWW-Authenticate: Bearer error="insufficient_user_authentication"` (RFC 9470).
+        La app pide un reto en `POST /v1/step-up/challenges`, lo firma con la llave
+        biométrica del dispositivo y repite la transferencia con el header `X-Step-Up`
+        y la misma `Idempotency-Key`.
+      security:
+        - cognito: [transfers.write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/StepUpProof'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransferRequest' }
+            examples:
+              renta:
+                summary: Pago de renta a otra cuenta Ámbar
+                value:
+                  source_account_id: 0b6c2f0e-6c47-4f5e-9b0e-2b9a4d1f7c11
+                  destination_clabe: '999180000000000015'
+                  amount: 650000
+                  concept: Renta septiembre
+      responses:
+        '201':
+          description: Transferencia registrada (o repetición idempotente)
+          headers:
+            Idempotent-Replayed:
+              description: '`true` cuando la respuesta es la original de una solicitud repetida.'
+              schema: { type: string, enum: ['true', 'false'] }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transfer' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/UnauthenticatedOrStepUp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/IdempotencyConflict' }
+        '422': { $ref: '#/components/responses/BusinessRule' }
+
+  /v1/devices:
+    get:
+      tags: [Dispositivos]
+      operationId: listDevices
+      summary: Dispositivos registrados del usuario
+      description: Solo los del usuario autenticado; nunca expone la llave pública completa.
+      security:
+        - cognito: [devices.write]
+      responses:
+        '200':
+          description: Dispositivos
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Dispositivos]
+      operationId: registerDevice
+      summary: Registra la llave pública de hardware de un dispositivo
+      description: |
+        La app genera un par ECDSA P-256 en Android Keystore o Secure Enclave, protegido
+        con biometría, y envía solo la llave pública (SPKI DER en base64). La llave
+        privada nunca sale del hardware. Máximo 3 dispositivos activos por usuario.
+      security:
+        - cognito: [devices.write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeviceRegistration' }
+      responses:
+        '201':
+          description: Dispositivo registrado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/BusinessRule' }
+
+  /v1/devices/{deviceId}:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    delete:
+      tags: [Dispositivos]
+      operationId: revokeDevice
+      summary: Revoca un dispositivo (por ejemplo, si se perdió el teléfono)
+      description: Sus retos pendientes dejan de ser válidos de inmediato.
+      security:
+        - cognito: [devices.write]
+      responses:
+        '204':
+          description: Dispositivo revocado
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/step-up/challenges:
+    post:
+      tags: [Dispositivos]
+      operationId: createStepUpChallenge
+      summary: Crea un reto de un solo uso ligado a una operación concreta
+      description: |
+        El reto dura 60 segundos y solo sirve para la operación descrita: el
+        `signing_payload` incluye el hash de la transferencia. Una firma para
+        $100 a una CLABE no sirve para $10,000 a otra.
+      security:
+        - cognito: [transfers.write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StepUpChallengeRequest' }
+      responses:
+        '201':
+          description: Reto creado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StepUpChallenge' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/entries/{entryId}:
+    parameters:
+      - $ref: '#/components/parameters/EntryId'
+    get:
+      tags: [Ledger]
+      operationId: getEntry
+      summary: Consulta un asiento con sus postings (operación)
+      description: Vista contable completa del asiento, con signos de débito y crédito. Solo operación.
+      security:
+        - cognito: [ledger.admin]
+      responses:
+        '200':
+          description: Asiento
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entry' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/entries/{entryId}/reversals:
+    parameters:
+      - $ref: '#/components/parameters/EntryId'
+    post:
+      tags: [Ledger]
+      operationId: reverseEntry
+      summary: Registra un asiento de reverso (el original nunca se modifica)
+      description: Crea un asiento con los postings invertidos. Un asiento solo se reversa una vez y un reverso no se reversa.
+      security:
+        - cognito: [ledger.admin]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReversalRequest' }
+      responses:
+        '201':
+          description: Asiento de reverso registrado
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string, enum: ['true', 'false'] }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entry' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/IdempotencyConflict' }
+        '422': { $ref: '#/components/responses/BusinessRule' }
+
+  /v1/qa/deposits:
+    post:
+      tags: [QA]
+      operationId: simulateDeposit
+      summary: Simula un depósito SPEI entrante (solo local, dev y staging)
+      description: Acredita la cuenta contra la cuenta de liquidación SPEI. El servicio no registra esta ruta en producción.
+      x-environments: [local, dev, staging]
+      security:
+        - cognito: [qa.write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DepositRequest' }
+      responses:
+        '201':
+          description: Depósito registrado
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string, enum: ['true', 'false'] }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entry' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/IdempotencyConflict' }
+        '422': { $ref: '#/components/responses/BusinessRule' }
+
+  /v1/devices/{deviceId}/push-token:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    put:
+      tags: [Dispositivos]
+      operationId: setDevicePushToken
+      summary: Registra o borra el token de notificaciones push del dispositivo
+      description: Se borra automáticamente al revocar el dispositivo. `null` lo elimina.
+      security:
+        - cognito: [devices.write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PushTokenRequest' }
+      responses:
+        '204':
+          description: Token actualizado
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/notifications:
+    get:
+      tags: [Avisos]
+      operationId: listNotifications
+      summary: Últimos 50 avisos del usuario
+      description: Incluye el número de avisos sin leer para el indicador de la app.
+      security:
+        - cognito: [accounts.read]
+      responses:
+        '200':
+          description: Avisos, del más reciente al más antiguo
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationInbox' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/notifications/{notificationId}/read:
+    parameters:
+      - $ref: '#/components/parameters/NotificationId'
+    post:
+      tags: [Avisos]
+      operationId: markNotificationRead
+      summary: Marca un aviso como leído
+      description: Idempotente; conserva la fecha de la primera lectura.
+      security:
+        - cognito: [accounts.write]
+      responses:
+        '204':
+          description: Aviso marcado como leído
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/fraud-cases/{caseId}:
+    parameters:
+      - $ref: '#/components/parameters/FraudCaseId'
+    get:
+      tags: [Avisos]
+      operationId: getFraudCase
+      summary: Consulta un caso de posible fraude sobre una transferencia propia
+      description: Solo los casos del usuario autenticado (404 en otro caso).
+      security:
+        - cognito: [accounts.read]
+      responses:
+        '200':
+          description: Caso
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FraudCase' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/fraud-cases/{caseId}/answer:
+    parameters:
+      - $ref: '#/components/parameters/FraudCaseId'
+    post:
+      tags: [Avisos]
+      operationId: answerFraudCase
+      summary: El cliente indica si reconoce la transferencia
+      description: |
+        Si responde que **no** la reconoce, la cuenta de origen se congela en la misma
+        transacción (puede recibir dinero, no enviarlo) y se emite `fraud_case.answered`
+        para que operación dé seguimiento. Repetir la misma respuesta es idempotente;
+        una respuesta distinta a un caso cerrado devuelve 409.
+      security:
+        - cognito: [transfers.write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FraudCaseAnswer' }
+      responses:
+        '200':
+          description: Caso resuelto
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FraudCaseResolution' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/admin/accounts/{accountId}/unfreeze:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    post:
+      tags: [Ledger]
+      operationId: unfreezeAccount
+      summary: Descongela una cuenta después de revisar el caso (operación)
+      description: Idempotente. Emite `account.unfrozen` con el operador y el motivo.
+      security:
+        - cognito: [ledger.admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UnfreezeRequest' }
+      responses:
+        '200':
+          description: Cuenta activa
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/assistant/messages:
+    post:
+      tags: [Asistente]
+      operationId: sendAssistantMessage
+      summary: Envía una pregunta al asistente y recibe su respuesta
+      description: |
+        Sin `conversation_id` empieza una conversación nueva (dura 24 horas). El asistente puede
+        consultar cuentas, movimientos, un resumen del mes y avisos; no puede hacer operaciones.
+        Antes de procesar el mensaje se ocultan tarjetas, CLABE, NIP, contraseñas y otros datos
+        personales, y `notices` le explica al usuario qué se ocultó. El token debe tener también
+        `accounts.read`: el asistente lo usa tal cual para consultar esta API.
+      security:
+        - cognito: [assistant.chat, accounts.read]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssistantMessageRequest' }
+      responses:
+        '200':
+          description: Respuesta del asistente
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssistantReply' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/assistant/conversations/{conversationId}:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [Asistente]
+      operationId: getAssistantConversation
+      summary: Historial de una conversación propia (texto ya redactado)
+      description: Solo las conversaciones del usuario autenticado y que no han vencido.
+      security:
+        - cognito: [assistant.chat]
+      responses:
+        '200':
+          description: Conversación
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssistantConversation' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Asistente]
+      operationId: deleteAssistantConversation
+      summary: Borra una conversación propia
+      description: El historial se elimina de inmediato. La auditoría no contiene el texto de la conversación.
+      security:
+        - cognito: [assistant.chat]
+      responses:
+        '204':
+          description: Conversación borrada
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/internal/notifications:
+    post:
+      tags: [Interna]
+      operationId: createNotification
+      summary: Crea un aviso para un cliente (n8n)
+      description: |
+        Idempotente por (`event_id`, destinatario, `kind`): si el flujo se reintenta, devuelve
+        el aviso original con 200 y no se duplica. La respuesta incluye los tokens push de los
+        dispositivos activos del cliente para que n8n envíe la notificación.
+      x-internal: true
+      security:
+        - cognitoM2M: [internal.notify]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InternalNotificationRequest' }
+      responses:
+        '201':
+          description: Aviso creado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalNotificationResult' }
+        '200':
+          description: El aviso ya existía
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalNotificationResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/internal/fraud-cases:
+    post:
+      tags: [Interna]
+      operationId: openFraudCase
+      summary: Abre un caso de posible fraude sobre una transferencia (n8n)
+      description: |
+        n8n decide *cuándo* (puntaje del evento `transfer.posted`); los datos del caso salen
+        del asiento, no de la solicitud. Crea en la misma transacción el aviso `FRAUD_CHECK`
+        con un texto fijo del core. Idempotente por `entry_id`.
+      x-internal: true
+      security:
+        - cognitoM2M: [internal.fraud]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InternalFraudCaseRequest' }
+      responses:
+        '201':
+          description: Caso abierto
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalFraudCaseResult' }
+        '200':
+          description: El caso ya existía
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalFraudCaseResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/internal/reconciliation:
+    get:
+      tags: [Interna]
+      operationId: getReconciliation
+      summary: Conciliación del ledger y salud del outbox (n8n, diaria)
+      description: |
+        `ok` es falso si algún saldo no coincide con sus postings, si el ledger no suma cero,
+        si hay eventos muertos o si el evento pendiente más antiguo tiene más de 5 minutos.
+      x-internal: true
+      security:
+        - cognitoM2M: [internal.reconcile]
+      responses:
+        '200':
+          description: Reporte
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReconciliationReport' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    cognito:
+      type: oauth2
+      description: |
+        Amazon Cognito (Authorization Code + PKCE). Los scopes se emiten con el
+        prefijo del resource server, p. ej. `ambar-api/transfers.write`.
+      flows:
+        authorizationCode:
+          authorizationUrl: https://auth.ambar.example/oauth2/authorize
+          tokenUrl: https://auth.ambar.example/oauth2/token
+          refreshUrl: https://auth.ambar.example/oauth2/token
+          scopes:
+            accounts.read: Consultar cuentas y movimientos propios
+            accounts.write: Abrir cuentas
+            transfers.write: Enviar transferencias
+            devices.write: Registrar y revocar dispositivos de la app móvil
+            ledger.admin: Operación del ledger (consultar y reversar asientos)
+            qa.write: Simular movimientos en entornos no productivos
+            assistant.chat: Conversar con el asistente financiero
+    cognitoM2M:
+      type: oauth2
+      description: Cognito client_credentials para la automatización (n8n). Solo dentro de la VPC.
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.ambar.example/oauth2/token
+          scopes:
+            internal.notify: Crear avisos para clientes
+            internal.fraud: Abrir casos de posible fraude
+            internal.reconcile: Consultar la conciliación del ledger y del outbox
+
+  parameters:
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    EntryId:
+      name: entryId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    DeviceId:
+      name: deviceId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ConversationId:
+      name: conversationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    NotificationId:
+      name: notificationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    FraudCaseId:
+      name: caseId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    StepUpProof:
+      name: X-Step-Up
+      in: header
+      required: false
+      description: '`<challenge_id>.<firma>`: la firma ECDSA (DER, base64url) del `signing_payload` del reto.'
+      schema: { type: string, pattern: '^[0-9a-f-]{36}\.[A-Za-z0-9_-]{16,200}$' }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID generado por el cliente; se reutiliza en cada reintento de la misma operación.
+      schema: { type: string, format: uuid }
+
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+    Amount:
+      type: integer
+      format: int64
+      description: Monto en centavos de MXN.
+      minimum: 1
+      maximum: 5000000
+      examples: [125050]
+    Clabe:
+      type: string
+      pattern: '^[0-9]{18}$'
+      description: CLABE de 18 dígitos (banco, plaza, cuenta y dígito verificador).
+      examples: ['999180000000000015']
+    Currency:
+      type: string
+      enum: [MXN]
+    Timestamp:
+      type: string
+      format: date-time
+
+    Account:
+      type: object
+      additionalProperties: false
+      required: [id, clabe, currency, status, balance, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        clabe: { $ref: '#/components/schemas/Clabe' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        status:
+          type: string
+          enum: [ACTIVE, FROZEN, CLOSED]
+        balance:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Saldo disponible en centavos.
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+
+    AccountList:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Account' }
+
+    Movement:
+      type: object
+      additionalProperties: false
+      required: [id, entry_id, kind, description, amount, created_at]
+      properties:
+        id:
+          type: string
+          pattern: '^[0-9]+$'
+          description: Identificador del posting (entero como texto).
+        entry_id: { $ref: '#/components/schemas/Uuid' }
+        kind: { $ref: '#/components/schemas/EntryKind' }
+        description: { type: string }
+        amount:
+          type: integer
+          format: int64
+          description: Centavos desde la perspectiva del cliente; positivo es abono, negativo es cargo.
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+
+    MovementPage:
+      type: object
+      additionalProperties: false
+      required: [data, next_cursor]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Movement' }
+        next_cursor:
+          type: [string, 'null']
+
+    TransferRequest:
+      type: object
+      additionalProperties: false
+      required: [source_account_id, destination_clabe, amount, concept]
+      properties:
+        source_account_id: { $ref: '#/components/schemas/Uuid' }
+        destination_clabe: { $ref: '#/components/schemas/Clabe' }
+        amount: { $ref: '#/components/schemas/Amount' }
+        concept:
+          type: string
+          minLength: 1
+          maxLength: 40
+          description: Concepto de pago (máximo 40 caracteres, como en SPEI).
+
+    Transfer:
+      type: object
+      additionalProperties: false
+      required: [id, status, source_account_id, destination_account_id, amount, currency, concept, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        status:
+          type: string
+          enum: [POSTED]
+        source_account_id: { $ref: '#/components/schemas/Uuid' }
+        destination_account_id: { $ref: '#/components/schemas/Uuid' }
+        amount: { $ref: '#/components/schemas/Amount' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        concept: { type: string }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+
+    EntryKind:
+      type: string
+      enum: [TRANSFER, DEPOSIT, REVERSAL]
+
+    Posting:
+      type: object
+      additionalProperties: false
+      required: [account_id, amount]
+      properties:
+        account_id: { $ref: '#/components/schemas/Uuid' }
+        amount:
+          type: integer
+          format: int64
+          description: Centavos con signo contable (débito positivo, crédito negativo).
+
+    Entry:
+      type: object
+      additionalProperties: false
+      required: [id, kind, description, reverses_id, created_at, postings]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        kind: { $ref: '#/components/schemas/EntryKind' }
+        description: { type: string }
+        reverses_id:
+          oneOf:
+            - $ref: '#/components/schemas/Uuid'
+            - type: 'null'
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        postings:
+          type: array
+          minItems: 2
+          items: { $ref: '#/components/schemas/Posting' }
+
+    ReversalRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 140
+
+    DepositRequest:
+      type: object
+      additionalProperties: false
+      required: [account_id, amount, concept]
+      properties:
+        account_id: { $ref: '#/components/schemas/Uuid' }
+        amount: { $ref: '#/components/schemas/Amount' }
+        concept:
+          type: string
+          minLength: 1
+          maxLength: 40
+
+    Device:
+      type: object
+      additionalProperties: false
+      required: [id, platform, name, status, created_at, last_used_at]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        platform: { type: string, enum: [ios, android] }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, REVOKED] }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        last_used_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+
+    DeviceList:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Device' }
+
+    DeviceRegistration:
+      type: object
+      additionalProperties: false
+      required: [public_key, platform, name]
+      properties:
+        public_key:
+          type: string
+          description: Llave pública ECDSA P-256 en formato SPKI DER, codificada en base64.
+          minLength: 80
+          maxLength: 200
+        platform: { type: string, enum: [ios, android] }
+        name:
+          type: string
+          minLength: 1
+          maxLength: 60
+          examples: ['iPhone de Ana']
+
+    TransferOperation:
+      type: object
+      additionalProperties: false
+      required: [type, source_account_id, destination_clabe, amount, concept]
+      properties:
+        type: { type: string, enum: [transfer] }
+        source_account_id: { $ref: '#/components/schemas/Uuid' }
+        destination_clabe: { $ref: '#/components/schemas/Clabe' }
+        amount: { $ref: '#/components/schemas/Amount' }
+        concept: { type: string, minLength: 1, maxLength: 40 }
+
+    StepUpChallengeRequest:
+      type: object
+      additionalProperties: false
+      required: [device_id, operation]
+      properties:
+        device_id: { $ref: '#/components/schemas/Uuid' }
+        operation: { $ref: '#/components/schemas/TransferOperation' }
+
+    StepUpChallenge:
+      type: object
+      additionalProperties: false
+      required: [id, expires_at, signing_payload]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        signing_payload:
+          type: string
+          description: Texto exacto que el dispositivo firma (UTF-8) con SHA256withECDSA.
+
+    PushTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [push_token]
+      properties:
+        push_token:
+          oneOf:
+            - type: string
+              pattern: '^Expo(nent)?PushToken\[[A-Za-z0-9_-]{8,128}\]$'
+              examples: ['ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]']
+            - type: 'null'
+
+    NotificationKind:
+      type: string
+      enum: [WELCOME, TRANSFER_SENT, TRANSFER_RECEIVED, DEPOSIT_RECEIVED, FRAUD_CHECK, ACCOUNT_FROZEN, SECURITY]
+
+    NotificationData:
+      type: object
+      additionalProperties: false
+      description: Referencias para navegar desde el aviso. Nunca datos personales.
+      properties:
+        account_id: { $ref: '#/components/schemas/Uuid' }
+        entry_id: { $ref: '#/components/schemas/Uuid' }
+        fraud_case_id: { $ref: '#/components/schemas/Uuid' }
+
+    Notification:
+      type: object
+      additionalProperties: false
+      required: [id, kind, title, body, data, created_at, read_at]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        kind: { $ref: '#/components/schemas/NotificationKind' }
+        title: { type: string, maxLength: 80 }
+        body: { type: string, maxLength: 280 }
+        data: { $ref: '#/components/schemas/NotificationData' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        read_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+
+    NotificationInbox:
+      type: object
+      additionalProperties: false
+      required: [data, unread_count]
+      properties:
+        data:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/Notification' }
+        unread_count: { type: integer, minimum: 0 }
+
+    RiskReason:
+      type: string
+      enum: [NEW_BENEFICIARY, UNUSUAL_AMOUNT, NIGHT_TIME, HIGH_VELOCITY]
+
+    FraudCaseFields:
+      type: object
+      description: Campos comunes de un caso (sin restringir propiedades extra; ver FraudCase).
+      required: [id, status, reasons, created_at, resolved_at, transfer]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        status: { type: string, enum: [OPEN, RECOGNIZED, NOT_RECOGNIZED] }
+        reasons:
+          type: array
+          items: { $ref: '#/components/schemas/RiskReason' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        resolved_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        transfer:
+          type: object
+          additionalProperties: false
+          required: [entry_id, amount, concept, destination_clabe_last4, created_at]
+          properties:
+            entry_id: { $ref: '#/components/schemas/Uuid' }
+            amount: { $ref: '#/components/schemas/Amount' }
+            concept: { type: string }
+            destination_clabe_last4: { type: string, pattern: '^\d{4}$' }
+            created_at: { $ref: '#/components/schemas/Timestamp' }
+
+    FraudCase:
+      description: El cliente ve los motivos, no el puntaje.
+      allOf:
+        - $ref: '#/components/schemas/FraudCaseFields'
+      unevaluatedProperties: false
+
+    FraudCaseAnswer:
+      type: object
+      additionalProperties: false
+      required: [recognized]
+      properties:
+        recognized: { type: boolean }
+
+    FraudCaseResolution:
+      allOf:
+        - $ref: '#/components/schemas/FraudCaseFields'
+        - type: object
+          required: [account_frozen]
+          properties:
+            account_frozen: { type: boolean }
+      unevaluatedProperties: false
+
+    UnfreezeRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 3, maxLength: 140 }
+
+    InternalNotificationRequest:
+      type: object
+      additionalProperties: false
+      description: Destinatario por `owner_id` o por `account_id` (exactamente uno).
+      required: [event_id, kind, title, body]
+      properties:
+        event_id: { $ref: '#/components/schemas/Uuid' }
+        kind: { $ref: '#/components/schemas/NotificationKind' }
+        owner_id: { type: string, minLength: 1, maxLength: 128 }
+        account_id: { $ref: '#/components/schemas/Uuid' }
+        title: { type: string, minLength: 1, maxLength: 80 }
+        body: { type: string, minLength: 1, maxLength: 280 }
+        data: { $ref: '#/components/schemas/NotificationData' }
+      oneOf:
+        - required: [owner_id]
+        - required: [account_id]
+
+    InternalNotificationResult:
+      type: object
+      additionalProperties: false
+      required: [notification, created, push_tokens]
+      properties:
+        notification: { $ref: '#/components/schemas/Notification' }
+        created: { type: boolean }
+        push_tokens:
+          type: array
+          items: { type: string }
+
+    InternalFraudCaseRequest:
+      type: object
+      additionalProperties: false
+      required: [entry_id]
+      properties:
+        entry_id: { $ref: '#/components/schemas/Uuid' }
+
+    InternalFraudCaseResult:
+      type: object
+      additionalProperties: false
+      required: [fraud_case, created, notification, push_tokens]
+      properties:
+        fraud_case:
+          allOf:
+            - $ref: '#/components/schemas/FraudCaseFields'
+            - type: object
+              required: [score, account_id]
+              properties:
+                score: { type: integer, minimum: 0, maximum: 100 }
+                account_id: { $ref: '#/components/schemas/Uuid' }
+          unevaluatedProperties: false
+        created: { type: boolean }
+        notification: { $ref: '#/components/schemas/Notification' }
+        push_tokens:
+          type: array
+          items: { type: string }
+
+    ReconciliationReport:
+      type: object
+      additionalProperties: false
+      required: [checked_at, ok, ledger, outbox]
+      properties:
+        checked_at: { $ref: '#/components/schemas/Timestamp' }
+        ok: { type: boolean }
+        ledger:
+          type: object
+          additionalProperties: false
+          required: [checked_at, accounts_checked, drift, ledger_total, ok]
+          properties:
+            checked_at: { $ref: '#/components/schemas/Timestamp' }
+            accounts_checked: { type: integer }
+            drift:
+              type: array
+              items:
+                type: object
+                required: [id, code, clabe, stored_balance, derived_balance]
+                properties:
+                  id: { $ref: '#/components/schemas/Uuid' }
+                  code: { type: [string, 'null'] }
+                  clabe: { type: [string, 'null'] }
+                  stored_balance: { type: integer, format: int64 }
+                  derived_balance: { type: integer, format: int64 }
+            ledger_total: { type: integer, format: int64 }
+            ok: { type: boolean }
+        outbox:
+          type: object
+          additionalProperties: false
+          required: [pending, dead, oldest_pending_seconds]
+          properties:
+            pending: { type: integer, minimum: 0 }
+            dead: { type: integer, minimum: 0 }
+            oldest_pending_seconds: { type: integer, minimum: 0 }
+
+    AssistantMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        conversation_id: { $ref: '#/components/schemas/Uuid' }
+        message:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          examples: ['¿En qué gasté más este mes?']
+
+    AssistantReply:
+      type: object
+      additionalProperties: false
+      required: [conversation_id, reply, tools_used, notices]
+      properties:
+        conversation_id: { $ref: '#/components/schemas/Uuid' }
+        reply:
+          type: object
+          additionalProperties: false
+          required: [text, created_at]
+          properties:
+            text: { type: string, maxLength: 1200 }
+            created_at: { $ref: '#/components/schemas/Timestamp' }
+        tools_used:
+          type: array
+          description: Consultas que hizo el asistente para responder (transparencia para el usuario).
+          items:
+            type: string
+            enum: [consultar_cuentas, consultar_movimientos, resumen_del_mes, consultar_avisos]
+        notices:
+          type: array
+          description: Avisos de privacidad, p. ej. que se ocultó una tarjeta del mensaje.
+          items: { type: string }
+
+    AssistantConversation:
+      type: object
+      additionalProperties: false
+      required: [id, messages, created_at, expires_at]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        messages:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [role, text, created_at]
+            properties:
+              role: { type: string, enum: [user, assistant] }
+              text: { type: string }
+              created_at: { $ref: '#/components/schemas/Timestamp' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details.
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        code:
+          type: string
+          description: |
+            Código estable para clientes y QA. Valores actuales:
+            VALIDATION_ERROR, UNAUTHENTICATED, FORBIDDEN, NOT_FOUND,
+            INSUFFICIENT_FUNDS, ACCOUNT_NOT_ACTIVE, SAME_ACCOUNT,
+            IDEMPOTENCY_KEY_REUSED, ALREADY_REVERSED, NOT_REVERSIBLE,
+            STEP_UP_REQUIRED, DEVICE_LIMIT_REACHED, FRAUD_CASE_CLOSED,
+            RATE_LIMITED, CONVERSATION_FULL, CONVERSATION_BUSY, ASSISTANT_UNAVAILABLE.
+        errors:
+          type: array
+          items:
+            type: object
+            required: [path, message]
+            properties:
+              path: { type: string }
+              message: { type: string }
+        step_up:
+          type: object
+          description: Solo con code STEP_UP_REQUIRED.
+          required: [reason]
+          properties:
+            reason:
+              type: string
+              enum: [AMOUNT_THRESHOLD, NEW_BENEFICIARY, INVALID_PROOF]
+            threshold:
+              type: integer
+              format: int64
+
+  responses:
+    ValidationError:
+      description: La solicitud no cumple el contrato
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthenticated:
+      description: Falta el token o es inválido
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UnauthenticatedOrStepUp:
+      description: Falta el token, es inválido, o la operación requiere confirmación biométrica (STEP_UP_REQUIRED)
+      headers:
+        WWW-Authenticate:
+          schema: { type: string }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: El token no tiene el scope requerido
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: El recurso no existe o no pertenece al usuario
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    IdempotencyConflict:
+      description: La Idempotency-Key ya se usó con un cuerpo distinto
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: El recurso está en un estado que no admite esta operación
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    RateLimited:
+      description: Se alcanzó un límite de uso
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unavailable:
+      description: Una dependencia (p. ej. el modelo de IA) no está disponible
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    BusinessRule:
+      description: La operación viola una regla de negocio (fondos, estado de la cuenta)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
