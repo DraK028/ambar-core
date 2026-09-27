@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Asistente financiero. Se construye desde la raíz del monorepo:
 #   docker build -f services/assistant/Dockerfile -t ambar-assistant .
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /repo
 COPY package.json package-lock.json turbo.json ./
 COPY packages/api-contract/package.json packages/api-contract/
@@ -20,7 +20,7 @@ COPY services/assistant services/assistant
 RUN npm run build --workspace @ambar/assistant \
  && npm prune --omit=dev --workspace @ambar/assistant
 
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 RUN addgroup -S ambar && adduser -S ambar -G ambar
