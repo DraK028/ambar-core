@@ -14,7 +14,7 @@
     "mock": "prism mock openapi.yaml --port 4010"
   },
   "devDependencies": {
-    "@stoplight/prism-cli": "^5.14.0",
+    "@stoplight/prism-cli": "^5.16.0",
     "@stoplight/spectral-cli": "^6.15.0"
   },
   "types": "index.d.ts"
