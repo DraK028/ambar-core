@@ -1,5 +1,8 @@
 # Ámbar.core
 
+[![CI](https://github.com/DraK028/ambar-core/actions/workflows/ci.yml/badge.svg)](https://github.com/DraK028/ambar-core/actions/workflows/ci.yml)
+[![Licencia MIT](https://img.shields.io/badge/licencia-MIT-blue.svg)](LICENSE)
+
 Core bancario omnicanal de portafolio. Este repositorio contiene la **fase 1** (contrato de la API, servicio **Ledger** con doble partida, pruebas, infraestructura base y CI) la **fase 2a** (Cognito, ECS Fargate, API Gateway con VPC Link y despliegue continuo) la **fase 2b** (banca web en Next.js con patrón BFF, pruebas E2E y publicación con CloudFront), la **fase 3** (app móvil con login biométrico por llave de hardware y confirmación de transferencias) la **fase 4** (eventos con outbox → EventBridge, automatización con n8n, avisos, detección de fraude con confirmación desde la app y conciliación diaria) y la **fase 5** (asistente financiero con IA en Bedrock, de solo lectura y con minimización de datos).
 
 > Proyecto educativo. No procesa dinero real; la CLABE usa un código de banco ficticio (`999`).
