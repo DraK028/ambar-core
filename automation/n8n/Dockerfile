@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # n8n con los flujos de Ámbar. Se construye desde la raíz del monorepo:
 #   docker build -f automation/n8n/Dockerfile -t ambar-n8n .
-FROM n8nio/n8n:2.40.7
+FROM n8nio/n8n:2.41.6
 
 USER root
 COPY automation/n8n/workflows/ /opt/ambar/workflows/
